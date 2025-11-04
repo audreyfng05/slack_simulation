@@ -49,6 +49,59 @@ class SlackAPIMethodsScraper:
             print(f"Error fetching {url}: {e}")
             return None
 
+    def scrape_category_methods(self, category: str, sample_method: str) -> List[Dict[str, str]]:
+        """
+        Scrape all methods from a specific category by visiting a sample method page.
+
+        The sidebar navigation on individual method pages shows all methods in that category.
+
+        Args:
+            category: Category name (e.g., 'chat', 'users')
+            sample_method: A sample method from this category (e.g., 'chat.postMessage')
+
+        Returns:
+            List of method dictionaries for this category
+        """
+        # Visit the sample method page to see the sidebar with all category methods
+        method_url = urljoin(self.BASE_URL, sample_method)
+        soup = self.fetch_page(method_url)
+
+        if not soup:
+            return []
+
+        methods = []
+
+        # Find all links - the sidebar should contain all methods in this category
+        all_links = soup.find_all('a', href=True)
+
+        for link in all_links:
+            href = link.get('href', '')
+
+            # Look for method links that belong to this category
+            # They should be in format /reference/methods/{category}.{method}
+            if '/reference/methods/' in href:
+                method_name = href.split('/reference/methods/')[-1].rstrip('/')
+
+                # Check if this method belongs to our category
+                if method_name.startswith(f'{category}.'):
+                    full_url = urljoin(self.BASE_URL, method_name)
+                    methods.append({
+                        'name': method_name,
+                        'category': category,
+                        'url': full_url,
+                        'description': link.get_text(strip=True)
+                    })
+
+        # Remove duplicates
+        seen = set()
+        unique_methods = []
+        for method in methods:
+            if method['name'] not in seen:
+                seen.add(method['name'])
+                unique_methods.append(method)
+
+        return unique_methods
+
     def scrape_methods_list(self) -> List[Dict[str, str]]:
         """
         Scrape the main methods page to get list of all API methods.
@@ -62,22 +115,41 @@ class SlackAPIMethodsScraper:
 
         methods = []
 
-        # Find all the method links
-        # Adjust selectors based on actual page structure
+        # Find all links on the page
         method_links = soup.find_all('a', href=True)
 
         for link in method_links:
             href = link.get('href', '')
 
-            # Filter for method links (typically in format /reference/methods/method.name)
-            if '/reference/methods/' in href and href != '/reference/methods/':
-                method_name = href.split('/reference/methods/')[-1].rstrip('/')
+            # Normalize href - remove leading slash if present
+            normalized_href = href.lstrip('/')
 
+            # Filter for method links in multiple possible formats
+            # Format 1: /reference/methods/method.name
+            # Format 2: reference/methods/method.name
+            # Format 3: Relative like chat.postMessage
+            is_method_link = False
+            method_name = None
+
+            if '/reference/methods/' in href and href != '/reference/methods/':
+                # Absolute path format
+                method_name = href.split('/reference/methods/')[-1].rstrip('/')
+                is_method_link = '.' in method_name  # Must have a dot (category.method)
+            elif normalized_href.startswith('reference/methods/'):
+                # Relative path format
+                method_name = normalized_href.split('reference/methods/')[-1].rstrip('/')
+                is_method_link = '.' in method_name
+
+            if is_method_link and method_name:
                 # Extract category (first part before dot)
                 parts = method_name.split('.')
                 category = parts[0] if parts else 'unknown'
 
-                full_url = urljoin(self.BASE_URL, href)
+                # Build full URL
+                if href.startswith('http'):
+                    full_url = href
+                else:
+                    full_url = urljoin(self.BASE_URL, method_name)
 
                 methods.append({
                     'name': method_name,
@@ -155,19 +227,46 @@ class SlackAPIMethodsScraper:
 
         return details
 
-    def scrape_all_methods(self, include_details: bool = False) -> List[Dict]:
+    def scrape_all_methods(self, include_details: bool = False, deep_scrape: bool = True) -> List[Dict]:
         """
         Scrape all Slack API methods.
 
         Args:
             include_details: If True, fetch detailed information for each method
+            deep_scrape: If True, scrape each category page for all methods
 
         Returns:
             List of method dictionaries
         """
         print("Scraping Slack API methods list...")
-        methods = self.scrape_methods_list()
-        print(f"Found {len(methods)} methods")
+        initial_methods = self.scrape_methods_list()
+        print(f"Found {len(initial_methods)} methods from main page")
+
+        if deep_scrape:
+            # Create a mapping of category to sample method
+            category_samples = {m['category']: m['name'] for m in initial_methods}
+            print(f"Found {len(category_samples)} categories, scraping each...")
+
+            all_methods = []
+            for i, (category, sample_method) in enumerate(sorted(category_samples.items())):
+                print(f"[{i+1}/{len(category_samples)}] Scraping {category} category using {sample_method}...")
+                category_methods = self.scrape_category_methods(category, sample_method)
+                print(f"  Found {len(category_methods)} methods in {category}")
+                all_methods.extend(category_methods)
+                time.sleep(self.rate_limit_delay)
+
+            # Remove duplicates across all methods
+            seen = set()
+            unique_methods = []
+            for method in all_methods:
+                if method['name'] not in seen:
+                    seen.add(method['name'])
+                    unique_methods.append(method)
+
+            methods = unique_methods
+            print(f"Total unique methods found: {len(methods)}")
+        else:
+            methods = initial_methods
 
         if include_details:
             print("Fetching detailed information for each method...")
